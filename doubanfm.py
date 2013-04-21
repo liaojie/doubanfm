@@ -2,13 +2,12 @@
 
 import json
 import requests
-import pygst
 import subprocess
-import termios
-import fcntl
 import sys
 import os
-from user import user, passwd
+import os.path
+import signal
+from select import select
 
 
 class DoubanFM():
@@ -19,11 +18,17 @@ class DoubanFM():
         self.channel = 1
         self.song_list = []
 
-    def login(self):
-        if user != '' and passwd != '':
-            email = user
-            password = passwd
+    def getUserInfo(self):
+        cur_path = os.path.dirname(os.path.abspath(__file__))
+        if os.path.exists('%s/user.py' %(cur_path)):
+            from user import user, passwd
+            return (user,passwd)
         else:
+            return ('', '')
+
+    def login(self):
+        email, password = self.getUserInfo()
+        if email == '' or password == '':
             import getpass
             email = raw_input('email:')
             password = getpass.getpass('password:')
@@ -56,8 +61,7 @@ class DoubanFM():
         url = 'http://www.douban.com/j/app/radio/people'
         if len(self.history) > 0:
             type = 'p'
-            #h = '|' + ':p|'.join(x['sid'] for x in self.history) + ':p'
-            h = ''
+            h = '|' + ':p|'.join(x['sid'] for x in self.history) + ':p'
             self.history = []
         else:
             type = 'n'
@@ -66,25 +70,21 @@ class DoubanFM():
             theparams = {
                 'app_name': 'radio_desktop_win', 'version': 100,
                 'user_id': self.user_id, 'expire': self.expire,
-                'token': self.token, 'sid': self.cur_song,
+                'token': self.token, 'sid': self.cur_song['sid'],
                 'h': h, 'channel': channel, 'type': type
             }
         else:
             theparams = {
                 'app_name': 'radio_desktop_win', 'version': 100,
-                'sid': self.cur_song, 'channel': channel, 'type': type
+                'sid': self.cur_song['sid'], 'channel': channel, 'type': type
             }
-        r = requests.get(url, params=theparams, proxies=None)
-        print r
-        print r.json()
+        r = requests.get(url, params=theparams)
         return r.json()['song']
 
     def getSong(self):
-        print len(self.song_list)
         if len(self.song_list) < 5:
             self.song_list.extend(self.getSongList(self.channel))
         song = self.song_list.pop(0)
-        print len(self.song_list)
         self.history.append(song)
         if len(self.history) > 15:
             self.history.pop(0)
@@ -96,10 +96,19 @@ class DoubanFM():
         cmd = ['ffplay', url, '-nodisp', '-autoexit']
         process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            process.communicate()
-        except Exception, e:
-            process.terminate()
+        while process.poll() == None:
+            try:
+                rlist,_,_ = select([sys.stdin],[],[],1)
+                if rlist:
+                    s = sys.stdin.readline()
+                    if s[0] == 'n':
+                        process.terminate()
+                    elif s[0] == 'p':
+                        os.kill(process.pid, signal.SIGSTOP)                   
+                    elif s[0] == 'c':
+                        os.kill(process.pid, signal.SIGCONT)
+            except Exception, e:
+                process.terminate()
 
     def main(self):
         self.getChannels()
@@ -112,8 +121,8 @@ class DoubanFM():
         self.changeChannel(int(channel))
         while True:
             song = self.getSong()
-            print song
             self.playing(url=song['url'])
+
 
 
 if __name__ == '__main__':
