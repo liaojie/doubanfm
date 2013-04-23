@@ -6,6 +6,8 @@ import requests
 import sys
 import os
 import os.path
+import termios
+import fcntl
 import gobject
 import thread
 import glib
@@ -29,10 +31,13 @@ class DoubanFM():
         self.bus.connect('message', self.onMessage)
 
     def onMessage(self, bus, message):
+        url = 'http://www.douban.com/j/app/login'
         t = message.type
         if t == gst.MESSAGE_EOS:
             self.player.set_state(gst.STATE_NULL)
             self.playmode = False
+            theparams = self.get_params('e')
+            r = requests.get(url, params=theparams)
         elif t == gst.MESSAGE_ERROR:
             self.player.set_state(gst.STATE_NULL)
             err, debug = message.parse_error()
@@ -87,18 +92,7 @@ class DoubanFM():
         else:
             type = 'n'
             h = ''
-        if self.is_logined:
-            theparams = {
-                'app_name': 'radio_desktop_win', 'version': 100,
-                'user_id': self.user_id, 'expire': self.expire,
-                'token': self.token, 'sid': self.cur_song['sid'],
-                'h': h, 'channel': channel, 'type': type
-            }
-        else:
-            theparams = {
-                'app_name': 'radio_desktop_win', 'version': 100,
-                'sid': self.cur_song['sid'], 'channel': channel, 'type': type
-            }
+        theparams = self.get_params(type)
         r = requests.get(url, params=theparams)
         return r.json()['song']
 
@@ -117,14 +111,14 @@ class DoubanFM():
         app_name = 'radio_desktop_win'
         version = 100
         if self.is_logined:
-            params = {'app_name':'radio_desktop_win','version':100,
-                    'user_id':self.user_id, 'expire':self.expire,
-                    'token':self.token, 'sid':self.cur_song['sid'],
-                    'channel':self.channel, 'type':type}
+            params = {'app_name': 'radio_desktop_win', 'version': 100,
+                      'user_id': self.user_id, 'expire': self.expire,
+                      'token': self.token, 'sid': self.cur_song['sid'],
+                      'channel': self.channel, 'type': type}
         else:
-            params = {'app_name':'radio_desktop_win','version':100,
-                    'sid':self.cur_song['sid'], 'channel':self.channel, 
-                    'type':type}
+            params = {'app_name': 'radio_desktop_win', 'version': 100,
+                      'sid': self.cur_song['sid'], 'channel': self.channel,
+                      'type': type}
         return params
 
     def skip(self):
@@ -142,9 +136,9 @@ class DoubanFM():
     def like(self, song):
         url = 'http://www.douban.com/j/app/radio/people'
         theparams = self.get_params('r')
-        r = requests.get(url, params = theparams)
+        r = requests.get(url, params=theparams)
         data = r.json()
-        #print data
+        # print data
         if data['r'] == 0:
             print 'You just starred this song.'
         else:
@@ -153,7 +147,7 @@ class DoubanFM():
     def dislike(self, song):
         url = 'http://www.douban.com/j/app/radio/people'
         theparams = self.get_params('u')
-        r = requests.get(url, params = theparams)
+        r = requests.get(url, params=theparams)
         data = r.json()
         if data['r'] == 0:
             print 'You just canceled starring this song.'
@@ -163,7 +157,7 @@ class DoubanFM():
     def delete(self, song):
         url = 'http://www.douban.com/j/app/radio/people'
         theparams = self.get_params('b')
-        r = requests.get(url, params = theparams)
+        r = requests.get(url, params=theparams)
         data = r.json()
         if data['r'] == 0:
             print 'No longer play this song.'
@@ -173,20 +167,33 @@ class DoubanFM():
         self.playmode = False
 
     def control(self, song):
-        rlist, _, _ = select([sys.stdin], [], [], 1)
-        if rlist:
-            s = sys.stdin.readline()
-            if s[0] == 'n':
-                self.skip()
-                return 'next'
-            elif s[0] == ' ':
-                self.pauseAndPlay()
-            elif s[0] == 'f':
-                self.like(song)
-            elif s[0] == 'u':
-                self.dislike(song)
-            elif s[0] == 'd':
-                self.delete(song)
+        fd = sys.stdin.fileno()
+        oldterm = termios.tcgetattr(fd)
+        newattr = oldterm[:]
+        newattr[3] = newattr[3] & ~termios.ICANON & ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSANOW, newattr)
+        oldflags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, oldflags | os.O_NONBLOCK)
+        try:
+            rlist, _, _ = select([fd], [], [], 1)
+            if rlist:
+                s = sys.stdin.read(1)
+                if s[0] == 'n':
+                    self.skip()
+                elif s[0] == ' ':
+                    self.pauseAndPlay()
+                elif s[0] == 'f':
+                    self.like(song)
+                elif s[0] == 'u':
+                    self.dislike(song)
+                elif s[0] == 'd':
+                    self.delete(song)
+        except IOError:
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSAFLUSH, oldterm)
+            fcntl.fcntl(fd, fcntl.F_SETFL, oldflags)
+            # pass
 
     def playing(self, song):
         self.player.set_property('uri', song['url'])
@@ -194,14 +201,11 @@ class DoubanFM():
         self.player.set_state(gst.STATE_PLAYING)
         while self.playmode:
             c = self.control(song)
-            if c == 'next':
-                break
-            pass
-    
+
     def usage(self):
         u = """
             跳过输入n, 加心输入f, 取消加心输入u, 不再播放输入d
-            暂停输入空格键，单曲重复输入r
+            暂停输入空格键,退出Control + c
             """
         print u
 
